@@ -1,0 +1,806 @@
+---
+title: "DM Statistique bayésienne"
+author: "Rudy Detain"
+date: "21/03/2019"
+header-includes:
+  \usepackage[francais]{babel}
+output:
+  pdf_document: 
+    
+    toc: true
+    number_sections: true
+    fig_width: 7
+    fig_height: 4.3
+    fig_caption: true
+  word_document: default
+  html_document:
+    number_sections: yes
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+fontsize: 9pt
+geometry: margin=1in
+---
+
+```{r wrap-hook, message=FALSE, warning=FALSE, include=FALSE}
+library(knitr)
+library(formatR)
+opts_chunk$set(tidy.opts=list(width.cutoff=90),tidy=TRUE)
+```
+
+---
+
+```{r setup, include=FALSE}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(BAS)
+library(bayess)
+```
+
+\pagebreak
+
+# Analyse exploratoire
+
+```{r, message = FALSE, warning = FALSE}
+df <- read_csv("xid-1430229_1.csv")
+```
+
+Nous formatons convenablement les covariables de type *factor*.
+
+```{r formattage, echo=TRUE, results=FALSE}
+df$code_etablissement = as.factor(df$code_etablissement)
+df$ville = as.factor(df$ville)
+df$etablissement = as.factor(df$etablissement)
+df$commune = as.factor(df$commune)
+df$Matiere = as.factor(df$Matiere)
+```
+
+Le jeu de données contient 516 couples établissements / matière différents.
+
+```{r echo=FALSE}
+glimpse(df)
+```
+
+L'histogramme du nombre de points requis pour une mutation nous montre qu'une attention particulière devra être portée à la queue de distribution (représentative des couples établissement/matière difficiles à obtenir).
+
+```{r echo=FALSE, message = FALSE, warning = FALSE}
+ggplot(data = df, aes(x  = Barre)) +
+  geom_histogram(aes(y=..density..), fill = "Grey", colour = "White") +
+  geom_density(alpha=.2, fill="#FF6577") +
+  ggtitle("Histogramme et densité du nombre de points requis pour une mutation")
+```
+
+Le graphique ci-dessous nous donne un aperçu de la participation des matières dans le jeu de données.
+
+```{r echo=FALSE}
+ggplot(data = df, aes(x  = Matiere)) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = ..count.., group = 1), vjust = -1) +
+  ggtitle("Représentation des matières dans le jeu de données") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+La densité des trois matières les mieux représentées est assez similaire à celle tracée pour l'ensemble du jeu de données. La matière *MATHS* est toutefois moins concernée par les valeurs extrêmes.
+
+```{r echo=FALSE}
+ggplot(data = df[df$Matiere %in% c('MATHS','ANGLAIS', 'HIST. GEO.'),], aes(x  = Barre, color = Matiere)) +
+  geom_density() +
+  ggtitle("Densité du nombre de points requis pour une mutation, pour les trois matières les plus représentées") +
+  theme(plot.title = element_text(size = 10))
+```
+
+Le graphique ci-dessous nous donne un aperçu de la participation des matières pouvant être difficiles à obtenir dans le jeu de données.
+
+```{r echo=FALSE}
+df1 = df
+df1$difficile <- ifelse(df1$Barre > 1000, "OUI", "NON")
+ggplot(data = df1, aes(x  = Matiere, fill = difficile)) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = ..count.., group = 1), vjust = -1) +
+  ggtitle("Représentation de la difficulté d'accès à la matière souhaitée") +
+  labs(fill = "Barre > 1000") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Nous affichons ci-dessous, par matière, la proportion de couples établissement / matière dont le nombre de points requis est supérieur à 1000.
+
+```{r echo=TRUE}
+table = table(df1[df1$Barre > 1000,]$Matiere)/table(df1$Matiere)
+table = sort(round(table,2), decreasing = T)
+table
+```
+
+Nous observons la densité de 3 matières bien représentées dans le jeu de données, et dont la proportion calculée ci-dessus est relativement importante. Nous remarquons que celles-ci sont très différentes. Seule *LET MODERN* a une distribution relativement proche de celle du jeu de données.
+
+```{r echo=FALSE, warning=TRUE}
+ggplot(data = df[df$Matiere %in% c('ECO.GE.FIN','PHILO', 'LET MODERN'),], aes(x  = Barre, color = Matiere)) +
+  geom_density() +
+  ggtitle("Densité du nombre de points requis pour une mutation (PHILO, ECO.GE.FIN et LET MODERN)")+
+  theme(plot.title = element_text(size = 10))
+```
+
+
+\pagebreak
+
+# Régression linéaire
+
+## Question 1
+
+Nous réalisons tout d'abord une régression linéaire fréquentiste. Nous obtenons des *NA* pour les estimations de certains coefficients.
+
+```{r, results = "hide"}
+summary(lm(Barre~., data = df))
+```
+
+Les covariables *commune* et *ville* nous donnent la même information. Nous retenons la covariable *commune*.
+
+```{r echo=TRUE}
+length(unique(df$ville))
+length(unique(df$commune))
+```
+
+De plus, nous remarquons que certains lycées (4 au total) possèdent le même nom.
+
+```{r echo=TRUE}
+w1 = unique(df[,c(1,3)])
+unique(w1[duplicated(w1$etablissement),][2])
+```
+
+Nous supprimons donc également la covariable *etablissement*, la covariable *code_etablissement* étant suffisante pour identifier chaque lycée de manière unique.
+
+```{r, include = FALSE}
+df2 = df[,-c(2,3,4)]
+```
+
+Nous remarquons que les coefficients des covariables quantitatives ne sont pas bien estimés (voir [Annexe 1](#Annexe-1)). Ces dernières représentent en effet les caractéristiques intrasèques des établissements, et sont donc toutes corrélées à la covariable *code_etablissement*. Nous choisissons de supprimer cette dernière.
+
+
+```{r Annexe 1, include = FALSE}
+summary(lm(Barre~., data = df2))
+```
+
+```{r, include = FALSE}
+df2 = df[,-c(1,2,3,4)]
+```
+
+Nous choisissons de normaliser les données. Cette opération est d'ailleurs conseillée dans le chapitre 3 de l'ouvrage **Bayesian Essential for R** (Jean-Michel Marin • Christian P. Robert), le processus inférentiel étant conditionné par la matrice de design *X*. Nous créons cette matrice à l'aide de la fonction *model.matrix* afin de transformer les covariables de type factor en covariables muettes.
+
+```{r, results = FALSE}
+X = model.matrix(Barre~., data = df2) #l'intercept est rajouté automatiquement.
+X1 = scale(X[,c(2:ncol(X))])
+X2 = cbind(X[,1],X1)
+y = as.matrix(df2[,c(2)])
+```
+
+Nous allons maintenant procéder à une inférence bayésienne en utilisant la loi a priori de *Zellner*. Nous réutilisons dans un premier temps le code vu en TP4 ( voir [Annexe 2](#Annexe-2)). 
+Nous fixons le paramètre *g* égal à *n*, de sorte que le poids de cette loi soit le même que celui d'une seule observation.
+
+```{r Annexe 2, include = FALSE}
+betahat = (lm(y~X2-1))$coefficients
+residuals = (lm(y~X2-1))$residuals
+s2 = t(residuals)%*%residuals
+n = length(y)
+g = n
+postmean_TD4 = betahat*g/(g+1) # espérance de beta a posteriori
+a = n/2
+b = s2/2 + 1/(2*g+2) * ((t(betahat)%*%t(X2))%*%(X2%*%betahat))
+b/(a-1) # espérance de sigma2
+```
+
+Nous pourrions comparer nos résultats avec ceux de la fonction *BayesReg* du package *bayess*. Cependant, une erreur apparaît lors de l'exécution du code. Ceci est probablement dû à la très grande valeur de *s2* qui fait tendre le log10bf relatif à chaque covariable vers une forme indéterminée.
+
+```{r, error=TRUE}
+BayesReg(y,X1)
+```
+
+Nous pouvons toutefois utiliser une partie du code de cette fonction pour vérifier le calcul de l'espérance des coefficients (a posteriori), ce code ayant pour mérite de ne pas directement faire appel à la fonction *lm* (code en [Annexe 3](#Annexe-3)).
+
+```{r Annexe 3, include = FALSE}
+bayesreg_modified = function (y, X, g = length(y), betatilde = rep(0, dim(X)[2]), prt = TRUE) 
+{
+X = as.matrix(X)
+g = length(y)
+p = dim(X)[2]
+if (det(t(X) %*% X) <= 1e-07) 
+  stop("The design matriX1 has a rank lower than the number of eX1planatory variables!\nCalculations cannot be done and the process should be stopped!", 
+       call. = FALSE)
+U = solve(t(X) %*% X) %*% t(X)
+alphaml = mean(y)
+betaml = U %*% y
+s2 = t(y - alphaml - X %*% betaml) %*% (y - alphaml - X %*% 
+                                          betaml)
+kappa = as.numeric(s2 + t(betatilde - betaml) %*% t(X) %*% 
+                     X %*% (betatilde - betaml)/(g + 1))
+malphabayes = alphaml
+mbetabayes = g/(g + 1) * (betaml + betatilde/g)
+msigma2bayes = kappa/(n - 3)
+valphabayes = kappa/(n * (n - 3))
+vbetabayes = diag(kappa * g/((g + 1) * (n - 3)) * solve(t(X) %*% 
+                                                          X))
+vsigma2bayes = 2 * kappa^2/((n - 3) * (n - 4))
+postmean = c(malphabayes, mbetabayes)
+postsqrt = sqrt(c(valphabayes, vbetabayes))
+return(postmean)
+}
+```
+
+```{r}
+postmean_bayesreg = bayesreg_modified(y,X1)
+```
+
+Les valeurs des coefficients obtenus par les deux méthodes ( voir [Annexe 4](#Annexe-4)) sont très proches de celles obtenues par l'estimation du maximum de vraissemblance. Ceci est cohérent puisque nous avons fixé *g = n*, ce qui donne une importance faible à la loi a priori. 
+L'impossibilité de calculer le log10bf nous empêche de comparer la significativité des covariables du modèle bayésien à celle du modèle fréquentiste.
+
+```{r Annexe 4, include=FALSE}
+pmVSpm2VSlm = data.frame(postmean_bayesreg, postmean_TD4, betahat)
+pmVSpm2VSlm
+```
+
+Les résultats du modèle fréquentiste sont commentés en [Annexe 5](#Annexe-5).
+
+```{r Annexe 5, include = FALSE}
+summary(lm(y~X2-1))
+plot(lm(y~X2-1))
+#les graphiques nous montrent :
+# que les données possèdent plus de valeurs extrêmes par rapport à ce qui est théoriquement attendu (QQplot)
+# que l'hypothèse d'homoscédasticité ne semble pas vérifiée (Scale-Location)
+# qu'un point influent (377) est présent (residuals vs leverage)
+```
+
+## Question 2
+### Caractéristiques des établissements
+
+Nous prenons l'hypothèse que la matière n'influe pas sur le nombre de points nécessaires pour obtenir une mutation dans l'académie. Nous supprimons donc la covariable *Matiere* du jeu de données initial et allons utiliser la méthode d'échantillonnage de Gibbs afin de déterminer quelles covariables inclure dans notre modèle final ( voir [Annexe 6](#Annexe-6)).
+
+```{r}
+df3 = df2[,-c(1)]
+X_et = as.matrix(df3[,c(2):ncol(df3)])
+X_et = cbind(1,X_et)
+y_et = as.matrix(df3[,c(1)])
+n_et = length(y_et)
+```
+
+```{r Annexe 6, include = FALSE}
+
+marglkd = function(gamma, X, g, y){
+  q=sum(gamma)
+  X1=X[,c(T,gamma)]
+  if(q==0){return(q/2*log(g+1) - g/2*log(t(y)%*%y))}
+  m = -q/2*log(g+1) -
+    n/2*log(t(y)%*%y - g/(g+1)* t(y)%*% X1 %*%
+              solve(t(X1)%*%X1) %*%t(X1)%*%y)
+return(m)
+}
+
+set.seed(1)
+niter = 1e4 # nombre d'iterations
+gamma_et = matrix(F,nrow=niter,ncol=17)
+gamma0 = sample(c(T,F),size=17, replace=TRUE) #valeur initiale aléatoire
+lkd = rep(0,niter)
+modelnumber = rep(0,niter)
+
+oldgamma = gamma0
+for(i in 1:niter){
+  newgamma = oldgamma
+  for(j in 1:17){
+    g1 = newgamma; g1[j]=TRUE
+    g2 = newgamma; g2[j]=FALSE
+    ml1 = marglkd(g1, X_et, n_et, y_et)
+    ml2 = marglkd(g2, X_et, n_et, y_et)
+    p = c(ml1,ml2)-min(ml1,ml2)
+    # On souhaite tirer depuis une Bernoulli, avec probabilité de tirer TRUE égale à exp(p[1])/(exp(p[1])+exp(p[2])).
+    # C'est ce que fait la ligne suivante. Notons que la fonction sample() calcule la constante de normalisation.
+    newgamma[j] = sample(c(T,F), size=1, prob=exp(p)) 
+  }
+  gamma_et[i,] = newgamma
+  lkd[i] = marglkd(newgamma, X_et, n_et, y_et)
+  modelnumber[i] = sum(newgamma*2^(0:16))
+  oldgamma = newgamma
+}
+
+meangamma_et = apply(gamma_et, 2, "mean")
+result = data_frame(meangamma_et, row.names = colnames(X_et[,-c(1)]))
+```
+
+Les probabilités de conservation de chaque gamma sont relativement très faibles. 
+
+Les deux variables les plus significatives sont : 
+
+- taux accès attendu premiere bac
+- taux accès attendu seconde bac
+
+```{r echo=FALSE}
+result
+```
+
+Les graphs d'autocorrélation (voir [Annexe 7](#Annexe-7)) ne présentent pas d'anomalie (décroissance rapide).
+
+```{r Annexe 7, include= FALSE, message= FALSE}
+par(mfrow=c(2,2))
+for(i in 1:17) acf(as.numeric(gamma_et[,i]))
+```
+
+Le modèle semble bien converger comme le montrent les graphiques en [Annexe 8](#Annexe-8).
+
+```{r Annexe 8, include=FALSE, message=FALSE}
+require(zoo)
+par(mfrow=c(2,2))
+for(i in 1:17) plot(rollapply(gamma_et[,i], width=100, FUN=mean), type="l")
+```
+
+Le meilleur modèle est celui retenant la covariable *taux accès attendu premiere bac*. Sa probabilité a posteriori est cependant relativement faible, ce qui donne une incertitude sur la qualité de prédiction de ce modèle. Les modèles suivants ont tous une probabilité a posteriori inférieure à 10%.
+
+```{r echo=FALSE}
+burnin = 500 # 500 itérations de burn-in
+gammab = modelnumber[(burnin+1):niter] 
+res = as.data.frame(table(gammab))
+odo = order(res$Freq, decreasing=T)[1:20]
+modcho = res$gammab[odo]
+probtop20 = res$Freq[odo]/(niter-burnin)
+
+indices = match(modcho, modelnumber)
+cbind(probtop20, gamma_et[indices, ])
+```
+
+De même, le modèle fréquentiste possède une mauvaise qualité de prédiction illustrée par une faible valeur du R2 (voir [Annexe 9](#Annexe-9)).
+
+```{r Annexe 9, include = FALSE}
+summary(step(lm(Barre~., data = df3),direction="backward", trace = F))
+```
+
+Au vu de ces résultats, un modèle de type régression linéaire, basé uniquement sur les caractéristiques des établissements, semble peu performant.
+
+### Matières
+
+Suite aux précédents résultats, nous faisons désormais l'hypothèse que les caractéristiques des établissements n'influencent pas le nombre de points requis pour une mutation. Nous retenons donc uniquement la variable *Matiere*.
+
+```{r}
+df4 = df2[,c(1,2)]
+X_ma = model.matrix(Barre~., data = df4)
+y_ma = as.matrix(df4[,c(2)])
+n_ma = length(y_ma)
+```
+
+Plusieurs matières apparaîssent comme significatives. Nous remarquons des probabilités a posteriori anormalement élevées pour deux matières : *MatiereECO.GE.FIN* et *MatiereECO.GE.CPT*. Ceci est probablement dû à leur faible représentativité dans le jeu de données. Le code utilisé est disponible est [Annexe 10](#Annexe-10).
+
+```{r Annexe 10, include = FALSE}
+set.seed(1)
+niter = 1e4 # nombre d'iterations
+gamma_ma = matrix(F,nrow=niter,ncol=34)
+gamma0 = sample(c(T,F),size=34, replace=TRUE) #valeur initiale aléatoire
+lkd = rep(0,niter)
+modelnumber = rep(0,niter)
+
+oldgamma = gamma0
+for(i in 1:niter){
+  newgamma = oldgamma
+  for(j in 1:34){
+    g1 = newgamma; g1[j]=TRUE
+    g2 = newgamma; g2[j]=FALSE
+    ml1 = marglkd(g1, X_ma, n_ma, y_ma)
+    ml2 = marglkd(g2, X_ma, n_ma, y_ma)
+    p = c(ml1,ml2)-min(ml1,ml2)
+    # On souhaite tirer depuis une Bernoulli, avec probabilité de tirer TRUE égale à exp(p[1])/(exp(p[1])+exp(p[2])).
+    # C'est ce que fait la ligne suivante. Notons que la fonction sample() calcule la constante de normalisation.
+    newgamma[j] = sample(c(T,F), size=1, prob=exp(p)) 
+  }
+  gamma_ma[i,] = newgamma
+  lkd[i] = marglkd(newgamma, X_ma, n_ma, y_ma)
+  modelnumber[i] = sum(newgamma*2^(0:33))
+  oldgamma = newgamma
+}
+
+meangamma_ma = apply(gamma_ma, 2, "mean")
+result = data_frame(meangamma_ma, row.names = colnames(X_ma[,-c(1)]))
+```
+
+```{r echo=FALSE}
+result
+```
+
+La convergence est bien est atteinte hormis pour la variable *MatiereECO.GE.FIN*, probablement pour la raison évoquée ci-dessus (voir [Annexe 11](#Annexe-11)).
+
+```{r eval=FALSE, include=FALSE}
+for(i in 1:35) acf(as.numeric(gamma_ma[,i]))
+```
+
+```{r Annexe 11, include=FALSE, message=FALSE}
+require(zoo)
+par(mfrow=c(2,2))
+for(i in 1:34) plot(rollapply(gamma_ma[,i], width=100, FUN=mean), type="l")
+```
+
+Lors de la sélection de modèle, nous remarquons que :
+
+- les probabilités a posteriori sont très faibles pour l'ensemble des modèles retenus,
+- les 2 premiers modèles ont une probabilité a posteriori identiques,
+- *ECO GE CPT* et *ECO GE GIN* sont retenues dans tous les modèles.
+
+Pour ce scénario (choix de la variable matière), nous aurions tendance à privilégier le deuxième modèle qui inclut le plus de variables à savoir : 
+
+- ECO GE CPT et ECO GE GIN
+- ITALIEN
+- LETTRES MODERN
+- PHILO
+- SII.ING.ME
+
+```{r echo=FALSE}
+burnin = 500 # 500 itérations de burn-in
+gammab = modelnumber[(burnin+1):niter] 
+res = as.data.frame(table(gammab))
+odo = order(res$Freq, decreasing=T)[1:20]
+modcho = res$gammab[odo]
+probtop20 = res$Freq[odo]/(niter-burnin)
+
+indices = match(modcho, modelnumber)
+cbind(probtop20, gamma_ma[indices, ])
+```
+
+Les résultats sont cependant très différents de ceux obtenus par une sélection d'un modèle de type *lm* via la fonction *step* (voir [Annexe 12](#Annexe-12)). Aucune des variables du modèle précédent, hormis *ECO GE FIN* ne sont ici retenues. Toutefois, le *R2* est bien plus important que celui obtenu dans la partie précédente (0.49).
+
+```{r Annexe 12, include = FALSE}
+summary(step(lm(y~X_ma-1, data = df4),direction="backward", trace = F))
+```
+
+L'ensemble des résultats nous montre qu'une inférence bayésienne ne tenant compte que des caractéristiques des établissements OU des matières désirées reste limitée dans le but d'expliquer le nombre de points requis pour une mutation.
+
+Cela ne semble pas incohérent car intuitivement, nous pouvons imaginer que l'accessibilité de certaines matières varie en fonction de l'établissement souhaité. C'est ce que nous allons étudier dans la question suivante.
+
+## Question 3
+
+Nous préparons deux jeux de données *df_maths* et *df_anglais*. Les covariables retenues sont les mêmes que celles retenues dans la partie *Caractéristiques des établissements* de la question précédente.
+
+```{r}
+df_ang = df2[df2$Matiere == "ANGLAIS",]
+df_mat = df2[df2$Matiere == "MATHS",]
+```
+
+```{r}
+df_ang = df_ang[,-c(1)]
+X_ang = as.matrix(df_ang[,c(2):ncol(df_ang)])
+X_ang = cbind(1,X_ang)
+y_ang = as.matrix(df_ang[,c(1)])
+n_ang = length(y_ang)
+
+df_mat = df_mat[,-c(1)]
+X_mat = as.matrix(df_mat[,c(2):ncol(df_mat)])
+X_mat = cbind(1,X_mat)
+y_mat = as.matrix(df_mat[,c(1)])
+n_mat = length(y_mat)
+```
+
+Nous utilisons la méthode d'échantillonnage de Gibbs sur les deux jeux de données. Nous calculons la proportion du temps où les gammas sont conservés pour mesurer leur significativité (voir [Annexe 13](#Annexe-13)). Nous remarquons que :
+
+- les probabilités pour les deux modèles sont relativement différentes,
+- les probabilités sont beaucoup plus importantes que celles obtenues dans la partie *Caractéristiques des établissements* de la question précédente,
+- la majorité des probabilités sont égales ou très proche de 1.
+
+
+```{r Annexe 13, include = FALSE}
+set.seed(2)
+
+niter = 1e4 # nombre d'iterations
+gamma_ang = matrix(F,nrow=niter,ncol=17)
+gamma0 = sample(c(T,F),size=17, replace=TRUE) #valeur initiale aléatoire
+lkd_ang = rep(0,niter)
+modelnumber_ang = rep(0,niter)
+
+oldgamma = gamma0
+for(i in 1:niter){
+  newgamma = oldgamma
+  for(j in 1:17){
+    g1 = newgamma; g1[j]=TRUE
+    g2 = newgamma; g2[j]=FALSE
+    ml1 = marglkd(g1, X_ang, n_ang, y_ang)
+    ml2 = marglkd(g2, X_ang, n_ang, y_ang)
+    p = c(ml1,ml2)-min(ml1,ml2)
+    # On souhaite tirer depuis une Bernoulli, avec probabilité de tirer TRUE égale à exp(p[1])/(exp(p[1])+exp(p[2])).
+    # C'est ce que fait la ligne suivante. Notons que la fonction sample() calcule la constante de normalisation.
+    newgamma[j] = sample(c(T,F), size=1, prob=exp(p)) 
+  }
+  gamma_ang[i,] = newgamma
+  lkd_ang[i] = marglkd(newgamma, X_ang, n_ang, y_ang)
+  modelnumber_ang[i] = sum(newgamma*2^(0:16))
+  oldgamma = newgamma
+}
+
+niter = 1e4 # nombre d'iterations
+gamma_mat = matrix(F,nrow=niter,ncol=17)
+gamma0 = sample(c(T,F),size=17, replace=TRUE) #valeur initiale aléatoire
+lkd_mat = rep(0,niter)
+modelnumber_mat = rep(0,niter)
+
+oldgamma = gamma0
+for(i in 1:niter){
+  newgamma = oldgamma
+  for(j in 1:17){
+    g1 = newgamma; g1[j]=TRUE
+    g2 = newgamma; g2[j]=FALSE
+    ml1 = marglkd(g1, X_mat, n_mat, y_mat)
+    ml2 = marglkd(g2, X_mat, n_mat, y_mat)
+    p = c(ml1,ml2)-min(ml1,ml2)
+    # On souhaite tirer depuis une Bernoulli, avec probabilité de tirer TRUE égale à exp(p[1])/(exp(p[1])+exp(p[2])).
+    # C'est ce que fait la ligne suivante. Notons que la fonction sample() calcule la constante de normalisation.
+    newgamma[j] = sample(c(T,F), size=1, prob=exp(p)) 
+  }
+  gamma_mat[i,] = newgamma
+  lkd_mat[i] = marglkd(newgamma, X_mat, n_mat, y_mat)
+  modelnumber_mat[i] = sum(newgamma*2^(0:16))
+  oldgamma = newgamma
+}
+meangamma_ang = apply(gamma_ang, 2, "mean")
+meangamma_mat = apply(gamma_mat, 2, "mean")
+result = data_frame(meangamma_ang, meangamma_mat, row.names = colnames(X_ang[,-c(1)]))
+```
+
+```{r echo=FALSE}
+result
+```
+
+Pour chacune des deux analyses, la convergence n'est pas atteinte pour une bonne partie des covariables (voir [Annexe 14](#Annexe-14)).
+
+```{r Annexe 14, include=FALSE, message=FALSE}
+require(zoo)
+par(mfrow=c(2,2))
+for(i in 1:17) plot(rollapply(gamma_mat[,i], width=100, FUN=mean), type="l")
+par(mfrow=c(2,2))
+for(i in 1:17) plot(rollapply(gamma_ang[,i], width=100, FUN=mean), type="l")
+```
+
+```{r include=FALSE}
+burnin = 500 # 500 itérations de burn-in
+gammab = modelnumber_mat[(burnin+1):niter] 
+res = as.data.frame(table(gammab))
+odo = order(res$Freq, decreasing=T)[1:20]
+modcho = res$gammab[odo]
+probtop50_mat = res$Freq[odo]/(niter-burnin)
+
+indices = match(modcho, modelnumber_mat)
+cbind(probtop50_mat, gamma_mat[indices, ])
+```
+
+```{r include=FALSE}
+burnin = 500 # 500 itérations de burn-in
+gammab = modelnumber_ang[(burnin+1):niter] 
+res = as.data.frame(table(gammab))
+odo = order(res$Freq, decreasing=T)[1:20]
+modcho = res$gammab[odo]
+probtop50_ang = res$Freq[odo]/(niter-burnin)
+
+indices = match(modcho, modelnumber_ang)
+cbind(probtop50_ang, gamma_ang[indices, ])
+```
+
+Nous observons que les deux meilleurs modèles retenus ne conservent pas les mêmes covariables. Malgré la fragilité de ces modèles sans doute liée au faible nombre d'observations des jeux de données, nous pouvons tout de même affirmer au vu de ces résultats, que la prédiction du nombre de points requis par les caractéristiques des établissements sera différente selon la matière considérée (*Anglais* ou *Maths*).
+
+```{r echo=FALSE}
+bestmodels = data.frame(row.names = colnames(X_ang[,-c(1)]),gamma_mat[indices, ][1,], gamma_ang[indices, ][1,])
+names(bestmodels) = c("bestmodel_maths","bestmodel_anglais")
+bestmodels
+```
+
+
+\pagebreak
+
+# Loi de Pareto
+## Question 4
+
+Nous allons utiliser le package *VGAM*.
+
+```{r include=FALSE}
+library(VGAM)
+library(gridExtra)
+```
+
+Nous faisons l'hypothèse que le nombre de points requis pour une admission suit une loi de Pareto de paramètres *m* et *alpha*.
+
+Nous fixons m = 21 qui est le minimum de la covariable *Barre*. *alpha* est inconnu.
+
+```{r include=FALSE}
+m = min(df$Barre)
+```
+
+Nous allons tout d'abord générer des réalisations d'une loi de Pareto afin d'étudier l'influence du paramètre *alpha*.
+
+Nous remarquons que : 
+
+- cette loi est plus proche de nos données que la loi gaussienne,
+- le paramètre *alpha* influe sur la hauteur de la distribution (plus *alpha* est grand, plus la hauteur de la distribution est importante).
+
+```{r echo=FALSE}
+
+r1 = data.frame(rpareto(1000, scale = m, 1))
+r2 = data.frame(rpareto(1000, scale = m, 5))
+r3 = data.frame(rpareto(1000, scale = m, 10))
+r4 = data.frame(rpareto(1000, scale = m, 100))
+
+p1 = ggplot(data = r1, aes(x  = r1$rpareto.1000..scale...m..1.)) +
+  geom_density(alpha=.2, fill="#FF6577") +
+  ggtitle("Shape = 1")
+
+p2 = ggplot(data = r2, aes(x  = r2$rpareto.1000..scale...m..5.)) +
+  geom_density(alpha=.2, fill="#FF6577") +
+  ggtitle("Shape = 5")
+
+p3 = ggplot(data = r3, aes(x  = r3$rpareto.1000..scale...m..10.)) +
+  geom_density(alpha=.2, fill="#FF6577") +
+  ggtitle("Shape = 10")
+
+p4 = ggplot(data = r4, aes(x  = r4$rpareto.1000..scale...m..100.)) +
+  geom_density(alpha=.2, fill="#FF6577") +
+  ggtitle("Shape = 100")
+
+grid.arrange(p1, p2, p3, p4, ncol=2, nrow = 2)
+```
+
+## Question 5
+
+La distribution de Pareto est reliée à la distribution exponentielle. Nous choisissons donc une loi a priori Gamma (2,2) pour le paramètre *alpha*.
+
+```{r echo=FALSE}
+n = length(df$Barre)
+curve(dgamma(x, 2, 2), xlim=c(0, 6), main="Prior Gamma(2,2)", ylab="density")
+```
+
+## Question 6
+
+Nous en déduisons la loi a posteriori du paramètre *alpha* (après réécriture de la densité de la loi de Pareto).
+
+```{r}
+curve(dgamma(x, 2+sum(log(df$Barre)/m), 2+n), xlim = c(0.2, 0.4), main="Posterior", ylab="density")
+```
+
+## Question 7
+
+Nous tirons 1000 réalisations de la loi a posteriori.
+
+```{r}
+niter = 1000
+alpha = rgamma(niter, 2+sum(log(df$Barre)/m), 2+n)
+hist(alpha)
+```
+
+L'intervalle de crédibilité à 95% est donnée ci-dessous.
+
+```{r echo=FALSE}
+quantile(alpha, c(0.025, 0.975))
+```
+
+La convergence de l'estimateur vers la moyenne est bien atteinte.
+
+```{r}
+plot(1:niter, cumsum(alpha)/(1:niter), type="l")
+```
+
+## Question 8
+
+Nous observons la loi a posteriori pour les deux jeux de données *df_mat* et *df_ang*.
+
+```{r echo=FALSE}
+n_mat = length(df_mat$Barre)
+m_mat = min(df_mat$Barre)
+n_ang = length(df_ang$Barre)
+m_ang = min(df_ang$Barre)
+curve(dgamma(x, 2+sum(log(df_mat$Barre)/m_mat), 2+n_mat), xlim = c(0.2, 0.4), main="Posterior Maths", ylab="density")
+curve(dgamma(x, 2+sum(log(df_ang$Barre)/m_ang), 2+n_ang), xlim = c(0.2, 0.4), main="Posterior Anglais", ylab="density")
+```
+
+```{r include=FALSE}
+niter = 1000
+alpha_mat = rgamma(niter, 2+sum(log(df_mat$Barre)/m_mat), 2+n_mat)
+alpha_ang = rgamma(niter, 2+sum(log(df_ang$Barre)/m_ang), 2+n_ang)
+mean = c(mean(alpha_mat),mean(alpha_ang))
+sd = c(sd(alpha_mat), sd(alpha_ang))
+quant2.5 = c(quantile(alpha_mat, c(0.025, 0.975))[1], quantile(alpha_ang, c(0.025, 0.975))[1])
+quant97.5= c(quantile(alpha_mat, c(0.025, 0.975))[2], quantile(alpha_ang, c(0.025, 0.975))[2])
+```
+
+Les résultats obtenus concernant le paramètre *alpha* sont relativement proches pour les deux matières étudiées. Ce qui nous incite finalement à penser que dans ce cas précis, la matière n'influe pratiquement pas à elle seule sur le nombre de points requis pour une mutation. Ces résultats sont ainsi différents de ceux obtenus dans le cadre d'une régression qui tient compte des caractéristiques des établissements.
+
+```{r echo=FALSE}
+pareto_angVSMat = data.frame(mean, sd, quant2.5, quant97.5)
+rownames(pareto_angVSMat) = c("Maths", "Anglais")
+colnames(pareto_angVSMat) = c("mean", "sd", "quantile 2.5%", "quantile 97.5%")
+pareto_angVSMat
+```
+
+\pagebreak
+
+# Annexes
+
+## Annexe 1 {#Annexe-1}
+
+```{r Annexe 1}
+```
+
+\pagebreak
+
+## Annexe 2 {#Annexe-2}
+
+```{r Annexe 2}
+```
+
+\pagebreak
+
+## Annexe 3 {#Annexe-3}
+
+```{r Annexe 3}
+```
+
+\pagebreak
+
+## Annexe 4 {#Annexe-4}
+
+```{r Annexe 4}
+```
+
+\pagebreak
+
+## Annexe 5 {#Annexe-5}
+
+```{r Annexe 5}
+```
+
+\pagebreak
+
+## Annexe 6 {#Annexe-6}
+
+```{r Annexe 6}
+```
+
+\pagebreak
+
+## Annexe 7 {#Annexe-7}
+
+```{r Annexe 7}
+```
+
+\pagebreak
+
+## Annexe 8 {#Annexe-8}
+
+```{r Annexe 8}
+```
+
+\pagebreak
+
+## Annexe 9 {#Annexe-9}
+
+```{r Annexe 9}
+```
+
+\pagebreak
+
+## Annexe 10 {#Annexe-10}
+
+```{r Annexe 10}
+```
+
+\pagebreak
+
+## Annexe 11 {#Annexe-11}
+
+```{r Annexe 11}
+```
+
+\pagebreak
+
+## Annexe 12 {#Annexe-12}
+
+```{r Annexe 12}
+```
+
+\pagebreak
+
+## Annexe 13 {#Annexe-13}
+
+```{r Annexe 13}
+```
+
+\pagebreak
+
+## Annexe 14 {#Annexe-14}
+
+```{r Annexe 14}
+```
