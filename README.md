@@ -1,6 +1,6 @@
 # bayesian-dauphine
 
-Projet : Statistiques bayésiennes avec R
+Projet : Statistique bayésienne avec R
 -
 
 Auteur : Rudy Detain  
